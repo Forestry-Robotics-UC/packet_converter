@@ -1,0 +1,57 @@
+# Use a stable python base
+FROM ros2-apparatus-base:jazzy AS converter
+
+RUN apt update --fix-missing
+
+# Install system dependencies needed to build the C++ extensions and common dev headers
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential \
+    cmake \
+    g++ \
+    git \
+    pkg-config \
+    python3-venv \
+    python3-dev \
+    libcap-dev \
+    libpcap-dev \
+    libzip-dev \
+    libeigen3-dev \
+    libflatbuffers-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    freeglut3-dev \
+    libx11-dev \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /docker_ws/src/
+
+RUN git clone -b ros2 --recurse-submodules https://github.com/ouster-lidar/ouster-ros.git && rosdep install --from-paths . -y --ignore-src
+
+WORKDIR /docker_ws/
+
+RUN . /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-up-to ouster_ros
+
+# Create a minimal Python virtualenv for the app
+WORKDIR /app
+RUN python3 -m venv .venv
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Copy entrypoint script into the image
+COPY ./docker_build/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+COPY ./docker_build/convert_bag_packets.py /app/convert_bag_packets.py
+COPY ./docker_build/requirements.txt /app/requirements.txt
+
+# Install pip tools first
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install -r /app/requirements.txt
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# Default command: print help from the Python script.
+CMD ["--help"]

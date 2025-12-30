@@ -1,0 +1,36 @@
+version: '3.9'
+
+networks:
+  ros2-net:
+    driver: bridge
+
+services:
+  # Base image - foundation for other services
+  base:
+    build:
+      context: .
+      dockerfile: Dockerfile.base
+      target: base
+      args:
+        ROS_DISTRO: jazzy
+    image: ros2-apparatus-base:jazzy
+    container_name: ros2-apparatus-base
+
+  converter:
+    build:
+      context: .
+      dockerfile: Dockerfile.converter
+      target: converter
+    image: ros2-apparatus-base:jazzy
+    stdin_open: true
+    tty: true
+    privileged: true
+    container_name: ros2-packet-converter
+    networks:
+      - ros2-net
+    volumes:
+      - ./rosbags:/rosbags  # Place your .mcap or .bag files here
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Use the entrypoint script; pass any script args via the SCRIPT_ARGS environment variable
+    command: ${SCRIPT_ARGS:-}

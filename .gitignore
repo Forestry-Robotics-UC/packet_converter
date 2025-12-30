@@ -1,0 +1,9 @@
+# Ignore everything inside the rosbags directory
+rosbags/*
+
+# But keep the directory itself by allowing the .gitkeep file
+!rosbags/.gitkeep
+
+# Other common ignores (optional, keep minimal per request)
+# __pycache__/
+# *.py[cod]
