@@ -29,11 +29,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 WORKDIR /docker_ws/src/
 
-RUN git clone -b ros2 --recurse-submodules https://github.com/ouster-lidar/ouster-ros.git && rosdep install --from-paths . -y --ignore-src
+# Use a single RUN layer to minimize image size
+RUN rm -rf ouster-ros && \
+    git clone -b ros2 --filter=blob:none --no-checkout https://github.com/ouster-lidar/ouster-ros.git && \
+    cd ouster-ros && \
+    git sparse-checkout set --cone ouster-sensor-msgs && \
+    git checkout ros2 && \
+    rosdep install --from-paths . -y --ignore-src
 
 WORKDIR /docker_ws/
 
-RUN . /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-up-to ouster_ros
+RUN . /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-up-to ouster_sensor_msgs
 
 # Create a minimal Python virtualenv for the app
 WORKDIR /app
