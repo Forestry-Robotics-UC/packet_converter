@@ -30,6 +30,7 @@ services:
       - ros2-net
     volumes:
       - ./rosbags:/rosbags  # Place your .mcap or .bag files here
+      - ./scripts:/app/scripts  # Place your conversion scripts here
     environment:
       - PYTHONUNBUFFERED=1
     # Use the entrypoint script; pass any script args via the SCRIPT_ARGS environment variable

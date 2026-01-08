@@ -21,7 +21,7 @@ fi
 
 # If first arg starts with - or no args provided, forward as-is
 # Run the converter script from workspace root
-SCRIPT_PATH="/app/convert_bag_packets.py"
+SCRIPT_PATH="/app/scripts/convert_bag_packets.py"
 if [ ! -f "$SCRIPT_PATH" ]; then
     echo "ERROR: $SCRIPT_PATH not found"
     exec bash
