@@ -6,22 +6,21 @@ networks:
 
 services:
   # Base image - foundation for other services
-  base:
-    build:
-      context: .
-      dockerfile: Dockerfile.base
-      target: base
-      args:
-        ROS_DISTRO: jazzy
-    image: ros2-apparatus-base:jazzy
-    container_name: ros2-apparatus-base
+  # base:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.base
+  #     target: base
+  #     args:
+  #       ROS_DISTRO: jazzy
+  #   image: ros2-apparatus-base:jazzy
+  #   container_name: ros2-apparatus-base
 
   converter:
     build:
       context: .
       dockerfile: Dockerfile.converter
-      target: converter
-    image: ros2-apparatus-base:jazzy
+    image: ros2-apparatus-converter:jazzy
     stdin_open: true
     tty: true
     privileged: true
@@ -35,3 +34,24 @@ services:
       - PYTHONUNBUFFERED=1
     # Use the entrypoint script; pass any script args via the SCRIPT_ARGS environment variable
     command: ${SCRIPT_ARGS:-}
+
+    # rqt_bag service with x11 forwarding for GUI
+  rqt_bag:
+    build:
+      context: .
+      dockerfile: Dockerfile.rqt_bag
+    image: ros2-apparatus-rqt-bag:jazzy
+    stdin_open: true
+    tty: true
+    privileged: true
+    container_name: ros2-rqt-bag
+    networks:
+      - ros2-net
+    volumes:
+      - ./rosbags:/rosbags  # Access the same .mcap or .bag files
+      - /tmp/.X11-unix:/tmp/.X11-unix  # X11 socket for GUI
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}  # Forward the display for GUI
+      - QT_X11_NO_MITSHM=1  # Disable MIT-SHM for X11 forwarding
+    command: rqt_bag  # Start rqt_bag directly  

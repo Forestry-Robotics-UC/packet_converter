@@ -1,0 +1,17 @@
+FROM ros:jazzy-ros-base
+
+ENV PYTHON_VERSION=python3
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y ros-jazzy-rqt-bag \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /
+
+COPY docker_build/entrypoint.sh /ros_entrypoint.sh
+RUN chmod +x /ros_entrypoint.sh
+
+ENTRYPOINT [ "/ros_entrypoint.sh" ]
+CMD [ "rqt_bag" ]
