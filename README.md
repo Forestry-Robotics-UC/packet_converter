@@ -29,9 +29,11 @@ This converter processes ROS2 MCAP bags recorded from Ouster sensors, transformi
 The converter extracts and includes multiple data channels when available:
 - **XYZ coordinates**: 3D point positions
 - **Intensity**: Signal strength (from SIGNAL field)
+- **Timestamp (t)**: Relative timestamp in nanoseconds since start of batch (uint32)
+- **Ring**: Vertical beam/channel index (0-127 for typical Ouster sensors)
 - **Reflectivity**: Surface reflectivity measurements
 - **Near-IR**: Near-infrared channel data
-- **Range**: Distance measurements (converted from mm to meters)
+- **Range**: Distance measurements in millimeters (uint32)
 
 ## Prerequisites
 
@@ -218,16 +220,37 @@ docker-compose run --rm converter \
 
 ### Timestamp Handling
 
-- **Message stamps**: Use timestamps extracted from ROS2 packet headers
+- **Message stamps**: ROS2 header timestamps use the first packet timestamp in each complete scan
 - **Bag timeline**: Original bag timestamps are preserved for all messages
-- **Scan timing**: Point clouds use the timestamp from the first packet in each complete scan
+- **Point timestamp field**: Each point includes a relative timestamp (in nanoseconds) calculated from the first column of the first packet in the batch, avoiding uint32 overflow
+- **Reference-based calculation**: Timestamps are computed as: `(packet_column_timestamp_ns - first_packet_first_column_ns) / 1000` and stored as uint32
 
 ### Data Processing
 
 - **Lidar**: Batches packets into complete scans using Ouster's ScanBatcher
-- **Point clouds**: Filters zero points and includes all available sensor fields
+- **Point clouds**: Filters zero points and includes all available sensor fields plus relative timestamps
+- **Timestamps**: Converts nanosecond packet timestamps relative to the batch start to fit within uint32 range without overflow
 - **IMU**: Converts accelerations to m/s² and angular velocities to rad/s
 - **Coordinate transform**: Uses Ouster's XYZLut for efficient point cloud generation
+
+### PointCloud2 Binary Layout
+
+The generated PointCloud2 messages use a 48-byte point structure:
+
+| Field | Type | Offset | Size | Notes |
+|-------|------|--------|------|-------|
+| x | FLOAT32 | 0 | 4 | X coordinate |
+| y | FLOAT32 | 4 | 4 | Y coordinate |
+| z | FLOAT32 | 8 | 4 | Z coordinate |
+| (padding) | - | 12 | 4 | Alignment |
+| intensity | FLOAT32 | 16 | 4 | Signal strength |
+| t | UINT32 | 20 | 4 | Relative timestamp (nanoseconds) |
+| reflectivity | UINT16 | 24 | 2 | Reflectivity |
+| ring | UINT16 | 26 | 2 | Beam/channel index |
+| ambient | UINT16 | 28 | 2 | Near-IR |
+| (padding) | - | 30 | 2 | Alignment |
+| range | UINT32 | 32 | 4 | Distance in millimeters |
+| (padding) | - | 36 | 12 | Alignment to 48 bytes |
 
 ### Splitting Behavior
 

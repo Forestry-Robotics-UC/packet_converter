@@ -38,6 +38,9 @@ class BagConverter:
         self.scan_count = 0
         self.pbar = None
         self.first_packet_timestamp = None  # Track first packet timestamp in batch
+        self.first_column_timestamp_ref = None  # Reference timestamp from first column of first packet in batch
+        self.packets_processed = 0
+        self.update_interval = 100  # Update progress every N packets
     
     @staticmethod
     def parse_size(size_str):
@@ -203,11 +206,16 @@ class BagConverter:
             if topic == self.args.metadata_topic:
                 self.handle_metadata(data)
             elif topic == self.args.imu_packets_topic and self.sensor_info:
-                if self.process_imu(data, tstamp, writer):
-                    self.update_progress()
+                self.process_imu(data, tstamp, writer)
+                self.packets_processed += 1
             elif topic == self.args.lidar_packets_topic and self.sensor_info:
-                if self.process_lidar(data, tstamp, writer):
-                    self.update_progress()
+                self.process_lidar(data, tstamp, writer)
+                self.packets_processed += 1
+            
+            # Batch update progress every N packets
+            if self.packets_processed % self.update_interval == 0:
+                self.pbar.update(self.update_interval)
+                self.update_progress()
 
         self.pbar.close()
         writer.close()
@@ -226,14 +234,15 @@ class BagConverter:
             self.lidar_scan = LidarScan(h, w)
             
             # Check what fields are available by testing if we can access them
+            # Note: TIMESTAMP and RING are always extracted (always present in packet)
             self.has_signal = False
             self.has_reflectivity = False
-            self.has_near_ir = False
             self.has_range = False
+            self.has_ambient = False
+            
+            from ouster.sdk.core import ChanField
             
             try:
-                from ouster.sdk.core import ChanField
-                # Try to access each field to verify availability
                 if hasattr(ChanField, 'SIGNAL'):
                     self.lidar_scan.field(ChanField.SIGNAL)
                     self.has_signal = True
@@ -241,7 +250,6 @@ class BagConverter:
                 pass
             
             try:
-                from ouster.sdk.core import ChanField
                 if hasattr(ChanField, 'REFLECTIVITY'):
                     self.lidar_scan.field(ChanField.REFLECTIVITY)
                     self.has_reflectivity = True
@@ -249,31 +257,29 @@ class BagConverter:
                 pass
             
             try:
-                from ouster.sdk.core import ChanField
-                if hasattr(ChanField, 'NEAR_IR'):
-                    self.lidar_scan.field(ChanField.NEAR_IR)
-                    self.has_near_ir = True
-            except:
-                pass
-            
-            try:
-                from ouster.sdk.core import ChanField
                 if hasattr(ChanField, 'RANGE'):
                     self.lidar_scan.field(ChanField.RANGE)
                     self.has_range = True
             except:
                 pass
             
-            fields_info = []
+            try:
+                if hasattr(ChanField, 'NEAR_IR'):
+                    self.lidar_scan.field(ChanField.NEAR_IR)
+                    self.has_ambient = True
+            except:
+                pass
+            
+            fields_info = ["TIMESTAMP", "RING"]  # Always present
             if self.has_signal:
                 fields_info.append("SIGNAL")
             if self.has_reflectivity:
                 fields_info.append("REFLECTIVITY")
-            if self.has_near_ir:
-                fields_info.append("NEAR_IR")
+            if self.has_ambient:
+                fields_info.append("AMBIENT")
             if self.has_range:
                 fields_info.append("RANGE")
-            fields_str = ", ".join(fields_info) if fields_info else "None"
+            fields_str = ", ".join(fields_info)
             
             self.pbar.write(f"[*] Ouster Metadata Initialized: {self.sensor_info.prod_line}")
             self.pbar.write(f"[*] Available fields: {fields_str}")
@@ -316,50 +322,91 @@ class BagConverter:
             return bytes(data)
 
     def update_progress(self):
+        """Update progress postfix with current stats."""
         self.pbar.set_postfix(scans=self.scan_count, imu=self.imu_count)
-        self.pbar.update(1)
 
     def create_cloud_with_fields(self, header, points, additional_fields):
         """
         Create a PointCloud2 message with XYZ and additional fields.
+        Fields structure with padding:
+        - x, y, z: FLOAT32 at offsets 0, 4, 8
+        - [4 byte padding]
+        - intensity: FLOAT32 at offset 16
+        - t: UINT32 at offset 20
+        - reflectivity: UINT16 at offset 24
+        - ring: UINT16 at offset 26
+        - ambient: UINT16 at offset 28
+        - [2 byte padding]
+        - range: UINT32 at offset 32
+        - [12 byte padding to reach 48]
         
         Args:
             header: ROS Header
             points: Nx3 numpy array of XYZ coordinates
-            additional_fields: List of tuples (field_name, field_data)
-                              where field_data is a numpy array of length N
+            additional_fields: Dict mapping field_name to numpy_array
         
         Returns:
             PointCloud2 message
         """
         from sensor_msgs.msg import PointField
         
-        # Define fields: X, Y, Z, and additional fields
+        # Define fields with correct offsets and datatypes
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='intensity', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='t', offset=20, datatype=PointField.UINT32, count=1),
+            PointField(name='reflectivity', offset=24, datatype=PointField.UINT16, count=1),
+            PointField(name='ring', offset=26, datatype=PointField.UINT16, count=1),
+            PointField(name='ambient', offset=28, datatype=PointField.UINT16, count=1),
+            PointField(name='range', offset=32, datatype=PointField.UINT32, count=1),
         ]
         
-        offset = 12
-        for field_name, _ in additional_fields:
-            fields.append(PointField(name=field_name, offset=offset, datatype=PointField.FLOAT32, count=1))
-            offset += 4
-        
-        # Create structured array
-        point_step = offset
-        cloud_data = np.zeros(len(points), dtype=[
+        # Create structured array matching exact offsets
+        dtype_list = [
             ('x', np.float32),
             ('y', np.float32),
             ('z', np.float32),
-        ] + [(name, np.float32) for name, _ in additional_fields])
+            ('pad1', np.uint32),  # 4 bytes padding (offsets 12-15)
+            ('intensity', np.float32),  # offset 16-19
+            ('t', np.uint32),  # offset 20-23
+            ('reflectivity', np.uint16),  # offset 24-25
+            ('ring', np.uint16),  # offset 26-27
+            ('ambient', np.uint16),  # offset 28-29
+            ('pad2', np.uint16),  # 2 bytes padding (offsets 30-31)
+            ('range', np.uint32),  # offset 32-35
+            ('pad3', np.uint32),  # 4 bytes padding (offsets 36-39)
+            ('pad4', np.uint32),  # 4 bytes padding (offsets 40-43)
+            ('pad5', np.uint32),  # 4 bytes padding (offsets 44-47)
+        ]
         
+        cloud_data = np.zeros(len(points), dtype=dtype_list)
         cloud_data['x'] = points[:, 0]
         cloud_data['y'] = points[:, 1]
         cloud_data['z'] = points[:, 2]
         
-        for field_name, field_data in additional_fields:
-            cloud_data[field_name] = field_data
+        # Fill in optional fields if present
+        if 'intensity' in additional_fields:
+            cloud_data['intensity'] = additional_fields['intensity'].astype(np.float32)
+        
+        if 't' in additional_fields:
+            cloud_data['t'] = additional_fields['t'].astype(np.uint32)
+        
+        if 'reflectivity' in additional_fields:
+            cloud_data['reflectivity'] = additional_fields['reflectivity'].astype(np.uint16)
+        
+        if 'ring' in additional_fields:
+            cloud_data['ring'] = additional_fields['ring'].astype(np.uint16)
+        
+        if 'ambient' in additional_fields:
+            cloud_data['ambient'] = additional_fields['ambient'].astype(np.uint16)
+        
+        if 'range' in additional_fields:
+            cloud_data['range'] = additional_fields['range'].astype(np.uint32)
+        
+        # Fixed point_step: 48 bytes
+        point_step = 48
         
         # Create PointCloud2 message
         pc_msg = PointCloud2()
@@ -421,6 +468,12 @@ class BagConverter:
             # Capture first packet timestamp when starting a new batch
             if self.first_packet_timestamp is None:
                 self.first_packet_timestamp = msg_stamp
+                # Also capture the first column timestamp from this first packet as reference
+                try:
+                    first_col_ts = self.lidar_scan.timestamp[0] if len(self.lidar_scan.timestamp) > 0 else 0
+                    self.first_column_timestamp_ref = int(first_col_ts) if first_col_ts else 0
+                except:
+                    self.first_column_timestamp_ref = 0
 
             # Check if batch is complete
             if self.scan_batcher(lidar_pkt, self.lidar_scan):
@@ -435,51 +488,82 @@ class BagConverter:
                     header.stamp = rclpy.time.Time(nanoseconds=self.first_packet_timestamp).to_msg()
                     header.frame_id = self.args.lidar_frame_id
                     
-                    # Extract intensity and reflectivity if available
-                    additional_fields = []
+                    # Extract all fields as a dictionary
+                    additional_fields = {}
+                    from ouster.sdk.core import ChanField
+                    
+                    # Extract TIMESTAMP - use per-column lidar timestamps with reference subtraction
+                    try:
+                        h = self.sensor_info.format.pixels_per_column
+                        w = self.sensor_info.format.columns_per_frame
+                        # Get per-column timestamps from the lidar scan (uint64, in nanoseconds)
+                        column_timestamps_ns = self.lidar_scan.timestamp  # Shape: (W,) - one per column
+                        
+                        # Subtract reference timestamp to get relative times (avoids overflow)
+                        # We can get away with this because each scan is only a few milliseconds, so relative times will fit in uint32
+                        # Handle uint64 properly: convert to int64 for subtraction
+                        column_timestamps_ns_int64 = column_timestamps_ns.astype(np.int64)
+                        ref_int64 = np.int64(self.first_column_timestamp_ref if self.first_column_timestamp_ref else 0)
+                        relative_timestamps_ns = column_timestamps_ns_int64 - ref_int64
+                        
+                        # Convert to uint32
+                        relative_timestamps_ns = (relative_timestamps_ns).astype(np.uint32)
+                        
+                        # Broadcast to match scan shape: tile column timestamps to (H, W)
+                        full_timestamp_field = np.tile(relative_timestamps_ns, (h, 1))
+                        # Flatten and apply mask
+                        timestamp_flat = full_timestamp_field.reshape(-1)[mask]
+                        additional_fields['t'] = timestamp_flat
+                    except Exception as e:
+                        self.pbar.write(f"[!] Failed to extract TIMESTAMP: {e}")
+                    
+                    # Extract RING (row index - which vertical beam/channel)
+                    try:
+                        h = self.sensor_info.format.pixels_per_column
+                        w = self.sensor_info.format.columns_per_frame
+                        # Create ring array: each row i has value i repeated w times (for all columns)
+                        # When LidarScan is flattened row-major, row 0 spans indices 0..w-1, row 1 spans w..2w-1, etc.
+                        ring_data = np.repeat(np.arange(h, dtype=np.uint16), w)  # Shape: (H*W,)
+                        ring_flat = ring_data[mask]
+                        additional_fields['ring'] = ring_flat.astype(np.uint16)
+                    except Exception as e:
+                        self.pbar.write(f"[!] Failed to extract RING: {e}")
                     
                     if self.has_signal:
                         try:
-                            from ouster.sdk.core import ChanField
                             signal = self.lidar_scan.field(ChanField.SIGNAL)
                             signal_flat = signal.reshape(-1)[mask]
-                            additional_fields.append(('intensity', signal_flat.astype(np.float32)))
+                            additional_fields['intensity'] = signal_flat.astype(np.float32)
                         except Exception as e:
                             self.pbar.write(f"[!] Failed to extract SIGNAL: {e}")
                     
                     if self.has_reflectivity:
                         try:
-                            from ouster.sdk.core import ChanField
                             reflectivity = self.lidar_scan.field(ChanField.REFLECTIVITY)
                             reflectivity_flat = reflectivity.reshape(-1)[mask]
-                            additional_fields.append(('reflectivity', reflectivity_flat.astype(np.float32)))
+                            additional_fields['reflectivity'] = reflectivity_flat.astype(np.uint16)
                         except Exception as e:
                             self.pbar.write(f"[!] Failed to extract REFLECTIVITY: {e}")
                     
-                    if self.has_near_ir:
+                    if self.has_ambient:
                         try:
-                            from ouster.sdk.core import ChanField
                             near_ir = self.lidar_scan.field(ChanField.NEAR_IR)
                             near_ir_flat = near_ir.reshape(-1)[mask]
-                            additional_fields.append(('near_ir', near_ir_flat.astype(np.float32)))
+                            additional_fields['ambient'] = near_ir_flat.astype(np.uint16)
                         except Exception as e:
                             self.pbar.write(f"[!] Failed to extract NEAR_IR: {e}")
                     
                     if self.has_range:
                         try:
-                            from ouster.sdk.core import ChanField
                             range_data = self.lidar_scan.field(ChanField.RANGE)
                             range_flat = range_data.reshape(-1)[mask]
-                            # Convert range from mm to meters
-                            additional_fields.append(('range', (range_flat / 1000.0).astype(np.float32)))
+                            # Convert range from mm to units expected by sensor (keeping as mm in uint32)
+                            additional_fields['range'] = range_flat.astype(np.uint32)
                         except Exception as e:
                             self.pbar.write(f"[!] Failed to extract RANGE: {e}")
                     
-                    # Create point cloud with additional fields
-                    if additional_fields:
-                        pc_msg = self.create_cloud_with_fields(header, valid_points, additional_fields)
-                    else:
-                        pc_msg = pc2.create_cloud_xyz32(header, valid_points)
+                    # Create point cloud with all available fields
+                    pc_msg = self.create_cloud_with_fields(header, valid_points, additional_fields)
                     
                     # CRITICAL: Write with ORIGINAL bag timestamp to preserve timeline
                     writer.write(self.args.points_topic, serialize_message(pc_msg), tstamp)
@@ -487,6 +571,7 @@ class BagConverter:
                 
                 # Reset for next batch
                 self.first_packet_timestamp = None
+                self.first_column_timestamp_ref = None
                 return True
             return False
         except Exception as e:

@@ -54,4 +54,4 @@ services:
       - PYTHONUNBUFFERED=1
       - DISPLAY=${DISPLAY}  # Forward the display for GUI
       - QT_X11_NO_MITSHM=1  # Disable MIT-SHM for X11 forwarding
-    command: rqt_bag  # Start rqt_bag directly  
+    command: rviz2  # Start rqt_bag directly  
